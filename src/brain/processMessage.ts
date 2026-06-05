@@ -56,25 +56,29 @@ export function makeProcessMessage(deps: BrainDeps) {
       ...(conflicted ? { previousUserId: conflicted.userId } : {}),
     });
 
-    // 5) compose the reply via Butterbase gateway (also injected)
+    // 5) Reply. Quorum is SILENT on accepted decisions — the user already
+    //    knows what they said; a confirmation reply is noise. We only speak
+    //    when there's a conflict to surface. Everything is still logged +
+    //    cached above this point, so the next message has full context.
+    if (!conflicted) {
+      return { reply: null };
+    }
+
     const systemPrompt = [
       "You are Quorum, an in-channel assistant that keeps a team's decisions consistent.",
-      "Reply in ONE short sentence. No preamble. Name the people involved when there is a conflict.",
+      "Reply in ONE short sentence. No preamble.",
+      "CRITICAL: Preserve any <@U0123456> tokens VERBATIM — they are Slack user mentions.",
+      "If you see <@U...> in the prompt, write it exactly the same way in your reply.",
+      "Do NOT replace them with names, do NOT remove the angle brackets, do NOT remove the @.",
     ].join(" ");
 
-    const userPrompt = conflicted
-      ? buildConflictPrompt({
-          newUserId: userId,
-          newValue: extracted.value,
-          priorUserId: conflicted.userId,
-          priorValue: conflicted.value,
-          topic: extracted.topic,
-        })
-      : buildConfirmPrompt({
-          userId,
-          topic: extracted.topic,
-          value: extracted.value,
-        });
+    const userPrompt = buildConflictPrompt({
+      newUserId: userId,
+      newValue: extracted.value,
+      priorUserId: conflicted.userId,
+      priorValue: conflicted.value,
+      topic: extracted.topic,
+    });
 
     const reply = await deps.composeReply(systemPrompt, userPrompt);
     return { reply };
