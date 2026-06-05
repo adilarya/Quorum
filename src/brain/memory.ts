@@ -127,16 +127,24 @@ async function realIngestDecision(
   const job = await client.memories.ingest(
     {
       messages: [
-        // Phrase as a natural-language statement so XTrace's extractor
-        // recognises it as a fact worth memorising. "key: value" gets
-        // classified as chit-chat and produces 0 memories.
+        // XTrace's extractor is trained on personal facts. Frame this as a
+        // first-person commitment ("I'm locking in...") with both the
+        // structured topic+value AND an explicit "please remember" cue, so
+        // the classifier treats it as a durable scheduling fact instead of
+        // chit-chat.
         {
           role: "user",
-          content: `The team's ${topic} is ${value}. This was committed by user ${userId}.`,
+          content:
+            `Please remember this scheduling commitment for my team: ` +
+            `the ${topic} is set to ${value}. ` +
+            `I'm locking this in as our current agreed value. ` +
+            `If I update it later, replace this with the new value.`,
         },
         {
           role: "assistant",
-          content: `Noted: ${topic} = ${value}.`,
+          content:
+            `Recorded. I'll remember that your team's ${topic} is ${value}. ` +
+            `I'll supersede this if you give me a new value for the same topic.`,
         },
       ],
       user_id: userId,
