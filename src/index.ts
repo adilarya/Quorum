@@ -63,7 +63,15 @@ async function loadProviders(provider: typeof config.provider): Promise<unknown[
     }
     case "slack": {
       const { slackProvider } = await import("./channel/slackProvider.js");
-      return [slackProvider()];
+      if (!config.slack.appToken || !config.slack.botToken) {
+        throw new Error("SLACK_APP_TOKEN and SLACK_BOT_TOKEN must be set");
+      }
+      return [
+        slackProvider.config({
+          appToken: config.slack.appToken,
+          botToken: config.slack.botToken,
+        }),
+      ];
     }
     case "imessage": {
       // KILL-SWITCH — needs Spectrum project creds (managed line).
