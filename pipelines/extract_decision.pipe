@@ -1,10 +1,76 @@
 {
-  "//": "PLACEHOLDER — build this in the RocketRide canvas (VS Code/Cursor).",
-  "//1": "source node: chat (one message string in)",
-  "//2": "LLM node prompt: 'Extract any committed decision from this message. Return JSON: {isDecision: bool, topic: string, value: string}. If chit-chat, isDecision=false.'",
-  "//3": "output node: JSON, schema { isDecision, topic, value }",
-  "name": "extract_decision",
-  "version": "0.0.0-placeholder",
-  "nodes": [],
-  "edges": []
+	"components": [
+		{
+			"id": "chat_1",
+			"provider": "chat",
+			"config": {
+				"hideForm": true,
+				"mode": "Source",
+				"parameters": {},
+				"type": "chat"
+			},
+			"ui": {
+				"position": { "x": 20, "y": 200 },
+				"measured": { "width": 150, "height": 66 },
+				"nodeType": "default",
+				"formDataValid": true
+			}
+		},
+		{
+			"id": "prompt_1",
+			"provider": "prompt",
+			"config": {
+				"instructions": [
+					"You will receive one short team chat message. Decide whether it commits the team to a decision (a date, an owner, a tech choice, a numeric commitment). If yes, extract the topic and the value. Return ONLY this JSON, no prose: {\"isDecision\": boolean, \"topic\": string, \"value\": string}. If chit-chat, return {\"isDecision\": false, \"topic\": \"\", \"value\": \"\"}.\nExamples:\n'beta ships June 20' -> {\"isDecision\": true, \"topic\": \"beta ship date\", \"value\": \"June 20\"}\n'lol same' -> {\"isDecision\": false, \"topic\": \"\", \"value\": \"\"}\nMessage: {{input}}"
+				],
+				"parameters": {}
+			},
+			"input": [{ "lane": "questions", "from": "chat_1" }],
+			"ui": {
+				"position": { "x": 240, "y": 200 },
+				"measured": { "width": 150, "height": 66 },
+				"nodeType": "default",
+				"formDataValid": true
+			}
+		},
+		{
+			"id": "llm_openai_api_1",
+			"provider": "llm_openai_api",
+			"config": {
+				"profile": "custom",
+				"custom": {
+					"apikey": "${ROCKETRIDE_BUTTERBASE_GATEWAY_KEY}",
+					"base_url": "https://api.butterbase.ai/v1",
+					"model": "anthropic/claude-sonnet-4.6",
+					"modelTotalTokens": 8192
+				},
+				"parameters": {}
+			},
+			"input": [{ "lane": "questions", "from": "prompt_1" }],
+			"ui": {
+				"position": { "x": 460, "y": 200 },
+				"measured": { "width": 150, "height": 66 },
+				"nodeType": "default",
+				"formDataValid": true
+			}
+		},
+		{
+			"id": "response_answers_1",
+			"provider": "response_answers",
+			"config": {
+				"laneName": "output"
+			},
+			"input": [{ "lane": "answers", "from": "llm_openai_api_1" }],
+			"ui": {
+				"position": { "x": 680, "y": 200 },
+				"measured": { "width": 150, "height": 66 },
+				"nodeType": "default",
+				"formDataValid": true
+			}
+		}
+	],
+	"source": "chat_1",
+	"project_id": "d204780a-2397-45cc-9e9f-e9dadb9c9c7a",
+	"viewport": { "x": 0, "y": 0, "zoom": 1 },
+	"version": 1
 }

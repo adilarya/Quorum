@@ -11,7 +11,7 @@
 
 import { definePlatform } from "spectrum-ts";
 import { SocketModeClient } from "@slack/socket-mode";
-import { WebClient } from "@slack/web-api";
+import { WebClient, LogLevel } from "@slack/web-api";
 import { z } from "zod";
 
 // ---------- inbound message shape after Slack -> internal normalisation ----------
@@ -36,21 +36,8 @@ class SlackPlatformClient {
     public readonly web: WebClient,
     public readonly botUserId: string,
   ) {
-    // DEBUG: catch every Socket Mode envelope so we can see if anything is
-    // arriving at all (independent of the message-event filter below).
-    // Remove once we're confident events route correctly.
-    this.sm.on("slack_event", (args: any) => {
-      const env = args?.body ?? args;
-      const type = env?.type ?? "?";
-      const innerType = env?.event?.type ?? env?.payload?.event?.type ?? "?";
-      const subtype = env?.event?.subtype ?? "-";
-      console.log(`[slack:debug] envelope type=${type} event=${innerType} subtype=${subtype}`);
-    });
-    this.sm.on("connecting", () => console.log("[slack:debug] connecting"));
-    this.sm.on("authenticated", () => console.log("[slack:debug] authenticated"));
-    this.sm.on("connected", () => console.log("[slack:debug] connected"));
-    this.sm.on("disconnected", () => console.log("[slack:debug] disconnected"));
-    this.sm.on("error", (e: any) => console.error("[slack:debug] error", e));
+    // Only surface real errors — connection lifecycle is internal.
+    this.sm.on("error", (e: any) => console.error("[slack] socket error:", e));
 
     // Attach BEFORE start() so we don't miss the first event.
     this.sm.on("message", async (args: any) => {
@@ -115,8 +102,8 @@ export const slackProvider = definePlatform("slack", {
 
   lifecycle: {
     createClient: async ({ config }) => {
-      const sm = new SocketModeClient({ appToken: config.appToken });
-      const web = new WebClient(config.botToken);
+      const sm = new SocketModeClient({ appToken: config.appToken, logLevel: LogLevel.ERROR });
+      const web = new WebClient(config.botToken, { logLevel: LogLevel.ERROR });
       const auth = await web.auth.test();
       const botUserId = String(auth.user_id ?? "");
       if (!botUserId) {

@@ -31,8 +31,6 @@ async function main(): Promise<void> {
   } as Parameters<typeof Spectrum>[0]);
 
   // Use a typing-indicator wrapper to cover XTrace re-ingest latency.
-  // for-await loop is the verified pattern.
-  // [VERIFY LIVE] exact field for the space id.
   for await (const [space, message] of app.messages) {
     if (message.content.type !== "text") continue;
     if (!message.sender) continue;                       // system / bot frames
@@ -57,7 +55,6 @@ async function loadProviders(provider: typeof config.provider): Promise<unknown[
   switch (provider) {
     case "terminal": {
       // STAGE A path — no creds needed.
-      // TODO(doc): confirm "spectrum-ts/providers/terminal" subpath if the import errors.
       const mod = await import("spectrum-ts/providers/terminal");
       return [mod.terminal.config()];
     }

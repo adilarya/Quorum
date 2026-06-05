@@ -147,24 +147,18 @@ async function realRecall(channelId: string, topic: string): Promise<RecallHit |
     pools: [{ group_ids: [groupId] }],
   });
 
-  if (!memories || memories.length === 0) return null;
+  const top = memories?.[0];
+  if (!top) return null;
 
-  // Parse topic/value/userId from the top-ranked memory
-  const top = memories[0];
-  const content = top.content || "";
-
-  // Try to extract topic and value from the content format "topic: value"
-  const match = content.match(/(.+?):\s*(.+)/);
+  // We store facts as `${topic}: ${value}` in realIngestDecision, so parse back.
+  const match = top.text.match(/(.+?):\s*(.+)/);
   if (!match) return null;
 
-  const recalledTopic = match[1]!.trim();
-  const recalledValue = match[2]!.trim();
-
   return {
-    topic: recalledTopic,
-    value: recalledValue,
-    userId: top.user_id || "",
-    createdAt: top.created_at || new Date().toISOString(),
+    topic: match[1]!.trim(),
+    value: match[2]!.trim(),
+    userId: top.user_id ?? "",
+    createdAt: top.created_at ?? new Date().toISOString(),
   };
 }
 

@@ -110,9 +110,6 @@ export const logDecision: LogDecision = async (row) => {
     return;
   }
 
-  // 1) Try the SDK insert. If the SDK surface is wrong under time pressure
-  //    we fall through to the auto-generated REST endpoint (the brief says
-  //    every table gets one by default).
   try {
     const bb: any = bbClient();
     // Service-key auth: most BaaS SDKs accept it via setSession or admin client.
@@ -120,30 +117,9 @@ export const logDecision: LogDecision = async (row) => {
       bb.setSession({ access_token: config.butterbase.apiKey });
     }
     const { error } = await bb.from("decisions").insert(payload);
-    if (!error) return;
-    console.warn("[butterbase] SDK insert returned error, falling back to REST:", error);
+    if (error) console.error("[butterbase] insert error:", error);
   } catch (err) {
-    console.warn("[butterbase] SDK insert threw, falling back to REST:", err);
-  }
-
-  // 2) REST fallback. Endpoint shape is best-guess from BaaS convention;
-  //    update once we confirm the exact path on dashboard.butterbase.ai/api docs.
-  try {
-    const restUrl = `${config.butterbase.apiUrl}/v1/apps/${config.butterbase.appId}/tables/decisions/rows`;
-    const r = await fetch(restUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.butterbase.apiKey}`,
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!r.ok) {
-      const body = await r.text();
-      console.error(`[butterbase] REST insert failed ${r.status}: ${body}`);
-    }
-  } catch (err) {
-    console.error("[butterbase] REST insert threw:", err);
+    console.error("[butterbase] insert threw:", err);
   }
 };
 
