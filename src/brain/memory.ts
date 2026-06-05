@@ -198,7 +198,7 @@ async function realRecall(channelId: string, topic: string): Promise<RecallHit |
  *   isValueRestatement("Beta will ship on March 20", "June 20")   -> false
  *   isValueRestatement("end-of-Q2 public beta target", "early Q3") -> false
  */
-function isValueRestatement(priorValue: string, newValue: string): boolean {
+export function isValueRestatement(priorValue: string, newValue: string): boolean {
   if (priorValue.toLowerCase() === newValue.toLowerCase()) return true;
   const pl = priorValue.toLowerCase();
   const words = newValue

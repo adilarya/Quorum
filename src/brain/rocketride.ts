@@ -89,19 +89,55 @@ function recentContextLines(channelId: string | undefined): string[] {
   return arr.map((d) => `- ${d.topic}: ${d.value}`);
 }
 
-export function recordRecentDecision(channelId: string, topic: string, value: string): void {
-  let arr = recentByChannel.get(channelId);
+export function recordRecentDecision(
+  channelId: string,
+  topic: string,
+  value: string,
+  userId: string,
+): void {
+  let arr = recentDetailedByChannel.get(channelId);
   if (!arr) {
     arr = [];
-    recentByChannel.set(channelId, arr);
+    recentDetailedByChannel.set(channelId, arr);
   }
   // Replace any prior entry with the same topic (case-insensitive) so the
-  // context list shows the *current* belief per topic, not the history.
+  // store holds the *current* belief per topic, not the history.
   const idx = arr.findIndex((d) => d.topic.toLowerCase() === topic.toLowerCase());
   if (idx >= 0) arr.splice(idx, 1);
-  arr.push({ topic, value });
-  if (arr.length > 10) arr.shift();
+  arr.push({ topic, value, userId });
+  if (arr.length > 50) arr.shift();
+
+  // Keep the simple list used by recentContextLines() in sync.
+  let simple = recentByChannel.get(channelId);
+  if (!simple) {
+    simple = [];
+    recentByChannel.set(channelId, simple);
+  }
+  const sIdx = simple.findIndex((d) => d.topic.toLowerCase() === topic.toLowerCase());
+  if (sIdx >= 0) simple.splice(sIdx, 1);
+  simple.push({ topic, value });
+  if (simple.length > 10) simple.shift();
 }
+
+/**
+ * Deterministic source of truth for "what does the team currently believe
+ * about this topic in this channel?" Used by the brain for conflict
+ * detection — independent of XTrace's eventual-consistency behaviour.
+ */
+export function getCurrentDecision(
+  channelId: string,
+  topic: string,
+): { topic: string; value: string; userId: string } | null {
+  const arr = recentDetailedByChannel.get(channelId);
+  if (!arr) return null;
+  const hit = arr.find((d) => d.topic.toLowerCase() === topic.toLowerCase());
+  return hit ?? null;
+}
+
+const recentDetailedByChannel = new Map<
+  string,
+  Array<{ topic: string; value: string; userId: string }>
+>();
 
 let _gateway: OpenAI | null = null;
 

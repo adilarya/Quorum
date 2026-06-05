@@ -3,8 +3,9 @@
 // Signature is frozen — if you need to change it, talk to Adil and update the
 // type, not the call sites.
 
-import { runPipeline, recordRecentDecision } from "./rocketride.js";
+import { runPipeline, recordRecentDecision, getCurrentDecision } from "./rocketride.js";
 import { ingestDecision } from "./memory.js";
+import { isValueRestatement } from "./memory.js";
 import type { BrainDeps, ProcessResult } from "./types.js";
 
 /**
@@ -25,21 +26,24 @@ export function makeProcessMessage(deps: BrainDeps) {
       return { reply: null };
     }
 
-    // 2) ingest the new statement — both real (XTrace) and mock paths recall
-    //    the prior belief internally and tell us via supersededPrior whether
-    //    the new statement conflicts with what the team already committed to.
-    const { supersededPrior } = await ingestDecision(
-      channelId,
-      userId,
-      extracted.topic,
-      extracted.value,
-    );
+    // 2) Conflict detection — deterministic. We use the in-memory cache as
+    //    the source of truth for "what does the team currently believe?",
+    //    independent of XTrace's eventual-consistency behaviour.
+    const prior = getCurrentDecision(channelId, extracted.topic);
+    const conflicted =
+      prior && !isValueRestatement(prior.value, extracted.value)
+        ? { topic: prior.topic, value: prior.value, userId: prior.userId, createdAt: new Date().toISOString() }
+        : null;
 
-    const conflicted = supersededPrior;
+    // 3) Ingest into XTrace as historical memory — best-effort, not on the
+    //    critical path. If XTrace silently drops it, we don't care; the
+    //    conflict has already been decided above.
+    void ingestDecision(channelId, userId, extracted.topic, extracted.value).catch((err) => {
+      console.warn("[memory] ingest failed (non-fatal):", err);
+    });
 
-    // Record into the per-channel context so the next message's extractor
-    // can match follow-ups to this topic instead of inventing a new one.
-    recordRecentDecision(channelId, extracted.topic, extracted.value);
+    // 4) Update the cache so the next message sees this as the current belief.
+    recordRecentDecision(channelId, extracted.topic, extracted.value, userId);
 
     // 4) log to Butterbase (injected — brain stays backend-agnostic)
     await deps.logDecision({
