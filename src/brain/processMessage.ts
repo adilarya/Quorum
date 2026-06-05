@@ -3,8 +3,8 @@
 // Signature is frozen — if you need to change it, talk to Adil and update the
 // type, not the call sites.
 
-import { runPipeline } from "./rocketride.js";
-import { ingestDecision, recallCurrent } from "./memory.js";
+import { runPipeline, recordRecentDecision } from "./rocketride.js";
+import { ingestDecision } from "./memory.js";
 import type { BrainDeps, ProcessResult } from "./types.js";
 
 /**
@@ -18,16 +18,16 @@ export function makeProcessMessage(deps: BrainDeps) {
     text: string,
   ): Promise<ProcessResult> {
     // 1) extract — pipeline says "is this a decision, and what about?"
-    const extracted = await runPipeline(text);
+    //    channelId gives the extractor recent decisions as context, so a
+    //    follow-up like "actually 6pm" reuses the existing topic name.
+    const extracted = await runPipeline(text, channelId);
     if (!extracted.isDecision) {
       return { reply: null };
     }
 
-    // 2) recall the current belief on this topic
-    const prior = await recallCurrent(channelId, extracted.topic);
-
-    // 3) ingest the new statement — XTrace supersedes server-side; in mock
-    //    we track it. Result tells us if there was a conflict.
+    // 2) ingest the new statement — both real (XTrace) and mock paths recall
+    //    the prior belief internally and tell us via supersededPrior whether
+    //    the new statement conflicts with what the team already committed to.
     const { supersededPrior } = await ingestDecision(
       channelId,
       userId,
@@ -35,9 +35,11 @@ export function makeProcessMessage(deps: BrainDeps) {
       extracted.value,
     );
 
-    const conflicted = supersededPrior ?? (
-      prior && prior.value.toLowerCase() !== extracted.value.toLowerCase() ? prior : null
-    );
+    const conflicted = supersededPrior;
+
+    // Record into the per-channel context so the next message's extractor
+    // can match follow-ups to this topic instead of inventing a new one.
+    recordRecentDecision(channelId, extracted.topic, extracted.value);
 
     // 4) log to Butterbase (injected — brain stays backend-agnostic)
     await deps.logDecision({

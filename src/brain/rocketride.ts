@@ -1,28 +1,22 @@
 // OWNER: Doniv (now maintained by Adil) — brain
-// runPipeline() wrapper around the RocketRide TS SDK.
-// Pipeline: chat → prompt → llm (Butterbase gateway) → extract_data → response_answers
-// Stage A: pure mock — keyword heuristic.
-// Stage C: real RocketRide engine on :5565, executing pipelines/extract_decision.pipe.
+// runPipeline() wrapper with a three-tier fallback chain:
+//   1) RocketRide pipeline (preferred, deep integration)
+//      - chat → prompt → llm (Butterbase gateway) → response_answers
+//      - requires the RocketRide engine to be reachable at the URI in .env
+//   2) Direct Butterbase AI Model Gateway call (same prompt, same model)
+//      - kicks in when RocketRide is unreachable but the gateway is configured
+//      - gives LLM-quality extraction without depending on a running engine
+//   3) Keyword heuristic (last resort)
 //
-// Per the RocketRide TS SDK docs: a pipeline whose source is `chat` must be
-// driven with `client.chat({ token, question })` — NOT `client.send()`,
-// which is for `webhook` / `dropper` sources. With `Question({ expectJson: true })`
-// the answer is delivered already parsed.
+// USE_MOCKS=true bypasses 1 and 2 entirely.
 
+import OpenAI from "openai";
 import { RocketRideClient, Question } from "rocketride";
 import { config } from "../config.js";
 import type { ExtractResult } from "./types.js";
 
-// ---------- Stage A: mock implementation ----------
+// ---------- 3) keyword heuristic (Stage A mock + final fallback) ----------
 
-/**
- * Very small heuristic so the Stage-A demo actually surfaces decisions.
- * Patterns it catches:
- *   "beta ships June 20"           -> { topic: "beta ship date", value: "June 20" }
- *   "deadline is July 5"           -> { topic: "deadline", value: "July 5" }
- *   "we're going with Postgres"    -> { topic: "database choice", value: "Postgres" }
- * Everything else is treated as chit-chat (isDecision: false).
- */
 function mockExtract(text: string): ExtractResult {
   const t = text.trim();
   const lower = t.toLowerCase();
@@ -45,7 +39,115 @@ function mockExtract(text: string): ExtractResult {
   return { isDecision: false, topic: "", value: "" };
 }
 
-// ---------- Stage C: real RocketRide client ----------
+// ---------- 2) direct Butterbase gateway extraction ----------
+
+const EXTRACTION_SYSTEM_PROMPT = [
+  "You are the extractor for Quorum, a team SCHEDULING assistant. Your ONLY job is to spot commitments about WHEN something happens — a date, a time, a deadline, a meeting time, an appointment.",
+  "Nothing else counts. Tech choices, opinions, jokes, names, prices, plans without a time → isDecision=false.",
+  "",
+  "You will receive:",
+  "- 'Existing decisions': the team's current scheduling commitments in this conversation (may be empty).",
+  "- 'New message': one short message from a team member.",
+  "",
+  "Pick ONE of three classifications for the new message:",
+  "  1. Off-topic / chit-chat / no when-commitment → {\"isDecision\": false, \"topic\": \"\", \"value\": \"\"}",
+  "  2. A NEW scheduling commitment about a topic NOT in 'Existing decisions'. Coin a short kebab-shaped topic such as:",
+  "     'meeting time', 'standup time', 'deadline for <thing>', '<thing> due date', 'launch date', 'ship date',",
+  "     'lunch time', 'coffee time', '<person> appointment', 'sync time'.",
+  "  3. An UPDATE to one of the 'Existing decisions' (follow-up phrasing: 'actually X', 'no wait', 'scratch that, X', 'make it X',",
+  "     'push to X', 'move to X', or a bare time/date right after a related commitment).",
+  "     YOU MUST REUSE THE EXACT TOPIC NAME from the existing list. This is how conflict detection works.",
+  "",
+  "For 'value': a short normalised string with the time/date. Keep the user's wording but clean it:",
+  "   '3pm Tuesday', 'June 20', '6/7/2026', 'tomorrow 5pm', 'next Friday at 10am', 'end of Q2'.",
+  "",
+  "Return ONLY this JSON. No prose, no code fence, no trailing comment:",
+  `{"isDecision": boolean, "topic": string, "value": string}`,
+  "",
+  "Examples:",
+  `Existing: (none). New: "meeting at 3pm tomorrow" -> {"isDecision": true, "topic": "meeting time", "value": "3pm tomorrow"}`,
+  `Existing: (none). New: "math hw due 6/7" -> {"isDecision": true, "topic": "math homework due date", "value": "6/7"}`,
+  `Existing: (none). New: "beta ships June 20" -> {"isDecision": true, "topic": "beta ship date", "value": "June 20"}`,
+  `Existing: (none). New: "let's grab coffee at 9am wednesday" -> {"isDecision": true, "topic": "coffee time", "value": "9am Wednesday"}`,
+  `Existing: (none). New: "we're using Postgres" -> {"isDecision": false, "topic": "", "value": ""}`,
+  `Existing: (none). New: "lol same" -> {"isDecision": false, "topic": "", "value": ""}`,
+  `Existing: ["meeting time: 3pm tomorrow"]. New: "actually 4pm" -> {"isDecision": true, "topic": "meeting time", "value": "4pm tomorrow"}`,
+  `Existing: ["coffee time: 9am Wednesday"]. New: "make it 10am instead" -> {"isDecision": true, "topic": "coffee time", "value": "10am Wednesday"}`,
+  `Existing: ["beta ship date: June 20"]. New: "push to July 5" -> {"isDecision": true, "topic": "beta ship date", "value": "July 5"}`,
+  `Existing: ["math homework due date: 6/7"]. New: "wait, hw is due 6/8" -> {"isDecision": true, "topic": "math homework due date", "value": "6/8"}`,
+  `Existing: ["standup time: 9am daily"]. New: "thanks!" -> {"isDecision": false, "topic": "", "value": ""}`,
+].join("\n");
+
+// Per-channel rolling list of recent decisions so the extractor can reuse
+// the canonical topic name when a follow-up refers to one of them.
+const recentByChannel = new Map<string, Array<{ topic: string; value: string }>>();
+
+function recentContextLines(channelId: string | undefined): string[] {
+  if (!channelId) return [];
+  const arr = recentByChannel.get(channelId);
+  if (!arr || arr.length === 0) return [];
+  return arr.map((d) => `- ${d.topic}: ${d.value}`);
+}
+
+export function recordRecentDecision(channelId: string, topic: string, value: string): void {
+  let arr = recentByChannel.get(channelId);
+  if (!arr) {
+    arr = [];
+    recentByChannel.set(channelId, arr);
+  }
+  // Replace any prior entry with the same topic (case-insensitive) so the
+  // context list shows the *current* belief per topic, not the history.
+  const idx = arr.findIndex((d) => d.topic.toLowerCase() === topic.toLowerCase());
+  if (idx >= 0) arr.splice(idx, 1);
+  arr.push({ topic, value });
+  if (arr.length > 10) arr.shift();
+}
+
+let _gateway: OpenAI | null = null;
+
+function gatewayClient(): OpenAI {
+  if (_gateway) return _gateway;
+  if (!config.butterbase.gatewayKey) {
+    throw new Error("BUTTERBASE_GATEWAY_KEY required for gateway extraction");
+  }
+  _gateway = new OpenAI({
+    apiKey: config.butterbase.gatewayKey,
+    baseURL: config.butterbase.gatewayUrl,
+  });
+  return _gateway;
+}
+
+async function gatewayExtract(text: string, channelId?: string): Promise<ExtractResult> {
+  const ctxLines = recentContextLines(channelId);
+  const userContent = ctxLines.length === 0
+    ? `Existing decisions: (none yet)\nNew message: "${text}"`
+    : `Existing decisions:\n${ctxLines.join("\n")}\n\nNew message: "${text}"`;
+
+  const r = await gatewayClient().chat.completions.create({
+    model: config.butterbase.gatewayModel ?? "anthropic/claude-sonnet-4.6",
+    messages: [
+      { role: "system", content: EXTRACTION_SYSTEM_PROMPT },
+      { role: "user", content: userContent },
+    ],
+    max_tokens: 200,
+    temperature: 0,
+  });
+
+  const content = r.choices[0]?.message.content?.trim() ?? "";
+  // Model occasionally wraps JSON in a code fence or adds prose. Grab the
+  // first balanced {...} block as the extraction result.
+  const match = content.match(/\{[\s\S]*?\}/);
+  if (!match) throw new Error(`no JSON in gateway response: ${content.slice(0, 120)}`);
+
+  const parsed = JSON.parse(match[0]);
+  return {
+    isDecision: Boolean(parsed.isDecision),
+    topic: String(parsed.topic ?? ""),
+    value: String(parsed.value ?? ""),
+  };
+}
+
+// ---------- 1) RocketRide pipeline ----------
 
 let _client: RocketRideClient | null = null;
 let _pipelineToken: string | null = null;
@@ -54,52 +156,35 @@ export async function initPipeline(): Promise<void> {
   if (config.useMocks) return;
 
   try {
-    // Per RocketRide docs: prefer the empty constructor so URI + APIKEY come
-    // from the extension-managed .env (ROCKETRIDE_URI / ROCKETRIDE_APIKEY).
-    // Hardcoding here loses the extension's host config and always misses.
+    // Empty constructor: SDK reads ROCKETRIDE_URI / ROCKETRIDE_APIKEY from .env
+    // (extension auto-syncs these when the user configures Direct Connect / Cloud).
     _client = new RocketRideClient();
     await _client.connect();
     const { token } = await _client.use({ filepath: config.rocketride.pipeline });
     _pipelineToken = token;
     console.log(`[rocketride] pipeline loaded (token=${token})`);
   } catch (error) {
-    console.warn("[rocketride] failed to initialize — falling back to mock pipeline:", error);
+    console.warn("[rocketride] engine unreachable — will use Butterbase gateway fallback:", error);
     _client = null;
     _pipelineToken = null;
   }
 }
 
-export async function runPipeline(text: string): Promise<ExtractResult> {
-  if (config.useMocks) return mockExtract(text);
+async function rocketrideExtract(text: string): Promise<ExtractResult> {
+  if (!_client || !_pipelineToken) throw new Error("rocketride not initialised");
 
-  if (!_client || !_pipelineToken) {
-    return mockExtract(text);
-  }
+  const question = new Question({ expectJson: true });
+  question.addQuestion(text);
 
-  try {
-    const question = new Question({ expectJson: true });
-    question.addQuestion(text);
+  const response: any = await _client.chat({ token: _pipelineToken, question });
+  const answer = extractAnswer(response);
+  if (!answer || typeof answer !== "object") throw new Error("no parseable answer from pipeline");
 
-    const response: any = await _client.chat({ token: _pipelineToken, question });
-
-    // Resilient answer lookup (per RocketRide COMMON_MISTAKES guidance):
-    //  1) Use result_types to find which key holds the "answers" lane.
-    //  2) Fall back to the conventional `answers` key.
-    //  3) Fall back to `output` (matches the laneName our .pipe currently sets).
-    const answer = extractAnswer(response);
-    if (!answer || typeof answer !== "object") {
-      return mockExtract(text);
-    }
-
-    return {
-      isDecision: Boolean(answer.isDecision),
-      topic: String(answer.topic ?? ""),
-      value: String(answer.value ?? ""),
-    };
-  } catch (error) {
-    console.warn("[rocketride] pipeline call failed — falling back to mock:", error);
-    return mockExtract(text);
-  }
+  return {
+    isDecision: Boolean(answer.isDecision),
+    topic: String(answer.topic ?? ""),
+    value: String(answer.value ?? ""),
+  };
 }
 
 function extractAnswer(response: any): any | null {
@@ -114,4 +199,31 @@ function extractAnswer(response: any): any | null {
   if (Array.isArray(response.answers) && response.answers.length > 0) return response.answers[0];
   if (Array.isArray(response.output) && response.output.length > 0) return response.output[0];
   return null;
+}
+
+// ---------- public surface ----------
+
+export async function runPipeline(text: string, channelId?: string): Promise<ExtractResult> {
+  if (config.useMocks) return mockExtract(text);
+
+  // Tier 1: RocketRide pipeline (if engine reachable)
+  if (_client && _pipelineToken) {
+    try {
+      return await rocketrideExtract(text);
+    } catch (error) {
+      console.warn("[rocketride] call failed, trying gateway fallback:", error);
+    }
+  }
+
+  // Tier 2: direct Butterbase gateway extraction with channel context
+  if (config.butterbase.gatewayKey) {
+    try {
+      return await gatewayExtract(text, channelId);
+    } catch (error) {
+      console.warn("[gateway] extract fallback failed, using heuristic:", error);
+    }
+  }
+
+  // Tier 3: keyword heuristic
+  return mockExtract(text);
 }

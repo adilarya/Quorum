@@ -106,7 +106,10 @@ async function realEnsureGroup(channelId: string): Promise<string> {
 
   const g = await client.groups.create({
     name: `team-quorum-${channelId}`,
-    prompt: "Decisions the team has committed to: dates, owners, tech choices, commitments.",
+    prompt:
+      "The team's scheduling commitments: meeting times, deadlines, appointments, due dates, " +
+      "ship/launch dates. Each fact is a topic + a time/date the team has agreed on. Keep one " +
+      "current value per topic — supersede older values when a new one is committed.",
   });
   realGroupIds.set(channelId, g.id);
   return g.id;
@@ -124,8 +127,17 @@ async function realIngestDecision(
   const job = await client.memories.ingest(
     {
       messages: [
-        { role: "user", content: `${topic}: ${value}` },
-        { role: "assistant", content: "Recorded." },
+        // Phrase as a natural-language statement so XTrace's extractor
+        // recognises it as a fact worth memorising. "key: value" gets
+        // classified as chit-chat and produces 0 memories.
+        {
+          role: "user",
+          content: `The team's ${topic} is ${value}. This was committed by user ${userId}.`,
+        },
+        {
+          role: "assistant",
+          content: `Noted: ${topic} = ${value}.`,
+        },
       ],
       user_id: userId,
       conv_id: channelId,
@@ -133,33 +145,60 @@ async function realIngestDecision(
     },
     { wait: true },
   );
-  await client.memories.jobs.pollUntilDone(job.id);
+  const done = await client.memories.jobs.pollUntilDone(job.id);
+  console.log(`[memory] ingest topic="${topic}" value="${value}" -> result:`, JSON.stringify((done as any)?.result ?? done, null, 0));
 
   const supersededPrior =
-    prior && prior.value.toLowerCase() !== value.toLowerCase() ? prior : null;
+    prior && !isValueRestatement(prior.value, value) ? prior : null;
+  if (supersededPrior) {
+    console.log(`[memory] conflict on "${topic}": prior="${prior!.value}" new="${value}"`);
+  }
   return { supersededPrior };
 }
 
 async function realRecall(channelId: string, topic: string): Promise<RecallHit | null> {
   const groupId = await realEnsureGroup(channelId);
+  // Richer query gives XTrace more semantic surface to match against the
+  // facts we ingested ("The team's <topic> is <value>").
   const { memories } = await client.memories.recall({
-    query: `current value for: ${topic}`,
+    query: `What is the team's current ${topic}?`,
     pools: [{ group_ids: [groupId] }],
   });
 
   const top = memories?.[0];
-  if (!top) return null;
+  if (!top) {
+    console.log(`[memory] recall miss for topic="${topic}"`);
+    return null;
+  }
+  console.log(`[memory] recall hit  for topic="${topic}": "${top.text}"`);
 
-  // We store facts as `${topic}: ${value}` in realIngestDecision, so parse back.
-  const match = top.text.match(/(.+?):\s*(.+)/);
-  if (!match) return null;
-
+  // XTrace paraphrases. Don't try to re-parse a "topic: value" shape — just
+  // hand back the stored text as the value and let isValueRestatement decide
+  // whether the new statement is a conflict or a restatement.
   return {
-    topic: match[1]!.trim(),
-    value: match[2]!.trim(),
+    topic,
+    value: top.text,
     userId: top.user_id ?? "",
     createdAt: top.created_at ?? new Date().toISOString(),
   };
+}
+
+/**
+ * True when `newValue` is contained inside `priorValue` token-wise —
+ * i.e. the new statement is a restatement of the prior one, not a conflict.
+ *   isValueRestatement("Beta will ship on March 20", "March 20")  -> true
+ *   isValueRestatement("Beta will ship on March 20", "June 20")   -> false
+ *   isValueRestatement("end-of-Q2 public beta target", "early Q3") -> false
+ */
+function isValueRestatement(priorValue: string, newValue: string): boolean {
+  if (priorValue.toLowerCase() === newValue.toLowerCase()) return true;
+  const pl = priorValue.toLowerCase();
+  const words = newValue
+    .toLowerCase()
+    .split(/[\s,.\-/]+/)
+    .filter((w) => w.length > 1);
+  if (words.length === 0) return false;
+  return words.every((w) => pl.includes(w));
 }
 
 // ---------- public wrapper surface ----------
