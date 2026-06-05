@@ -1,0 +1,29 @@
+{
+  "name": "quorum",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Slack agent that catches contradicting team decisions and reconciles them live.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p .",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "spectrum-ts": "*",
+    "@xtraceai/memory": "*",
+    "rocketride": "*",
+    "@butterbase/sdk": "*",
+    "@slack/socket-mode": "*",
+    "@slack/web-api": "*",
+    "openai": "*",
+    "zod": "*",
+    "dotenv": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0",
+    "@types/node": "^20.12.0"
+  }
+}

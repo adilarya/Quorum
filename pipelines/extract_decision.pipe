@@ -1,0 +1,10 @@
+{
+  "//": "PLACEHOLDER — build this in the RocketRide canvas (VS Code/Cursor).",
+  "//1": "source node: chat (one message string in)",
+  "//2": "LLM node prompt: 'Extract any committed decision from this message. Return JSON: {isDecision: bool, topic: string, value: string}. If chit-chat, isDecision=false.'",
+  "//3": "output node: JSON, schema { isDecision, topic, value }",
+  "name": "extract_decision",
+  "version": "0.0.0-placeholder",
+  "nodes": [],
+  "edges": []
+}
