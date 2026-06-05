@@ -89,58 +89,83 @@ async function mockIngest(
   return { supersededPrior };
 }
 
-// ---------- Stage B: real XTrace client (STUB until wired) ----------
-// TODO(doc): https://docs.xtrace.ai/guides/typescript-sdk
-//   import { MemoryClient } from "@xtraceai/memory";
-//   const client = new MemoryClient({ apiKey: config.xtrace.apiKey!, orgId: config.xtrace.orgId! });
-let _client: unknown = null;
+// ---------- Stage B: real XTrace client ----------
+import { MemoryClient } from "@xtraceai/memory";
 
-async function realEnsureGroup(_channelId: string): Promise<string> {
-  // TODO(doc): cache groupId per channelId in a Map. On miss:
-  //   const g = await client.groups.create({
-  //     name: `team-quorum-${_channelId}`,
-  //     prompt: "Decisions the team has committed to: dates, owners, tech choices, commitments.",
-  //   });
-  //   return g.id;
-  throw new Error("XTrace real ensureGroup not wired yet — STUB.");
+const client = new MemoryClient({
+  apiKey: config.xtrace.apiKey!,
+  orgId: config.xtrace.orgId!,
+});
+
+// Cache groupId per channelId to avoid creating duplicate groups
+const realGroupIds = new Map<string, string>();
+
+async function realEnsureGroup(channelId: string): Promise<string> {
+  const cached = realGroupIds.get(channelId);
+  if (cached) return cached;
+
+  const g = await client.groups.create({
+    name: `team-quorum-${channelId}`,
+    prompt: "Decisions the team has committed to: dates, owners, tech choices, commitments.",
+  });
+  realGroupIds.set(channelId, g.id);
+  return g.id;
 }
 
 async function realIngestDecision(
-  _channelId: string,
-  _userId: string,
-  _topic: string,
-  _value: string,
+  channelId: string,
+  userId: string,
+  topic: string,
+  value: string,
 ): Promise<{ supersededPrior: RecallHit | null }> {
-  // TODO(doc):
-  //   const groupId = await realEnsureGroup(_channelId);
-  //   const prior  = await realRecall(_channelId, _topic);
-  //   const job = await client.memories.ingest(
-  //     {
-  //       messages: [
-  //         { role: "user", content: `${_topic}: ${_value}` },
-  //         { role: "assistant", content: "Recorded." },
-  //       ],
-  //       user_id: _userId,
-  //       conv_id: _channelId,
-  //       group_ids: [groupId],
-  //     },
-  //     { wait: true },
-  //   );
-  //   await client.memories.jobs.pollUntilDone(job.id);
-  //   const supersededPrior = (prior && prior.value.toLowerCase() !== _value.toLowerCase()) ? prior : null;
-  //   return { supersededPrior };
-  throw new Error("XTrace real ingestDecision not wired yet — STUB.");
+  const groupId = await realEnsureGroup(channelId);
+  const prior = await realRecall(channelId, topic);
+
+  const job = await client.memories.ingest(
+    {
+      messages: [
+        { role: "user", content: `${topic}: ${value}` },
+        { role: "assistant", content: "Recorded." },
+      ],
+      user_id: userId,
+      conv_id: channelId,
+      group_ids: [groupId],
+    },
+    { wait: true },
+  );
+  await client.memories.jobs.pollUntilDone(job.id);
+
+  const supersededPrior =
+    prior && prior.value.toLowerCase() !== value.toLowerCase() ? prior : null;
+  return { supersededPrior };
 }
 
-async function realRecall(_channelId: string, _topic: string): Promise<RecallHit | null> {
-  // TODO(doc):
-  //   const groupId = await realEnsureGroup(_channelId);
-  //   const { memories } = await client.memories.recall({
-  //     query: `current value for: ${_topic}`,
-  //     pools: [{ group_ids: [groupId] }],
-  //   });
-  //   parse out topic/value/userId from the top-ranked memory.
-  throw new Error("XTrace real recall not wired yet — STUB.");
+async function realRecall(channelId: string, topic: string): Promise<RecallHit | null> {
+  const groupId = await realEnsureGroup(channelId);
+  const { memories } = await client.memories.recall({
+    query: `current value for: ${topic}`,
+    pools: [{ group_ids: [groupId] }],
+  });
+
+  if (!memories || memories.length === 0) return null;
+
+  // Parse topic/value/userId from the top-ranked memory
+  const top = memories[0];
+  const content = top.content || "";
+
+  // Try to extract topic and value from the content format "topic: value"
+  const match = content.match(/(.+?):\s*(.+)/);
+  if (!match) return null;
+
+  const recalledTopic = match[1]!.trim();
+  const recalledValue = match[2]!.trim();
+
+  return {
+    topic: recalledTopic,
+    value: recalledValue,
+    userId: top.user_id || "",
+    createdAt: top.created_at || new Date().toISOString(),
+  };
 }
 
 // ---------- public wrapper surface ----------
@@ -171,5 +196,3 @@ export async function ingestDecision(
     : realIngestDecision(channelId, userId, topic, value);
 }
 
-// Keep linter quiet about the unused real client placeholder.
-void _client;

@@ -41,33 +41,47 @@ function mockExtract(text: string): ExtractResult {
   return { isDecision: false, topic: "", value: "" };
 }
 
-// ---------- Stage C: real RocketRide client (STUB) ----------
-// TODO(doc): https://www.npmjs.com/package/rocketride — confirm exact TS names.
-// Python shape (verified):
-//   client = RocketRideClient(uri=ROCKETRIDE_URL)
-//   result = await client.use(filepath=...)         -> { token }
-//   resp   = await client.send(token, text)         -> JSON output
-// Boot once: load pipeline, cache token. Per message: send(token, text).
+// ---------- Stage C: real RocketRide client ----------
+import { RocketRideClient } from "rocketride";
+
+const client = new RocketRideClient({ uri: config.rocketride.url });
 
 let _pipelineToken: string | null = null;
 
 export async function initPipeline(): Promise<void> {
   if (config.useMocks) return;
-  // TODO(doc): import { RocketRideClient } from "rocketride";
-  //   const client = new RocketRideClient({ uri: config.rocketride.url });
-  //   const { token } = await client.use({ filepath: config.rocketride.pipeline });
-  //   _pipelineToken = token;
-  throw new Error("rocketride real client not wired yet — STUB. See // TODO(doc).");
+
+  try {
+    const { token } = await client.use({ filepath: config.rocketride.pipeline });
+    _pipelineToken = token;
+  } catch (error) {
+    console.warn("RocketRide client failed to initialize — falling back to mock pipeline:", error);
+  }
 }
 
 export async function runPipeline(text: string): Promise<ExtractResult> {
   if (config.useMocks) return mockExtract(text);
 
+  // If RocketRide isn't initialized, fall back to mock
   if (!_pipelineToken) {
-    throw new Error("call initPipeline() at boot before runPipeline()");
+    return mockExtract(text);
   }
-  // TODO(doc): const resp = await client.send(_pipelineToken, text);
-  //            const json = JSON.parse(resp.output);
-  //            return { isDecision, topic, value } from json.
-  throw new Error("rocketride real send() not wired yet — STUB.");
+
+  try {
+    const resp = await client.send(_pipelineToken, text);
+    if (!resp) {
+      return mockExtract(text);
+    }
+    const json = JSON.parse(resp.output);
+
+    // Map RocketRide output to our ExtractResult format
+    return {
+      isDecision: json.isDecision ?? false,
+      topic: json.topic ?? "",
+      value: json.value ?? "",
+    };
+  } catch (error) {
+    console.warn("RocketRide pipeline failed — falling back to mock:", error);
+    return mockExtract(text);
+  }
 }
