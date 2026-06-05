@@ -38,11 +38,13 @@ export const config = {
   },
 
   butterbase: {
-    projectId: opt("BUTTERBASE_PROJECT_ID"),
+    appId: opt("BUTTERBASE_APP_ID"),
     apiKey: opt("BUTTERBASE_API_KEY"),
-    gatewayUrl: opt("BUTTERBASE_GATEWAY_URL"),
+    apiUrl: opt("BUTTERBASE_API_URL") ?? "https://api.butterbase.ai",
+    anonKey: opt("BUTTERBASE_ANON_KEY"),
+    gatewayUrl: opt("BUTTERBASE_GATEWAY_URL") ?? "https://api.butterbase.ai/v1",
     gatewayKey: opt("BUTTERBASE_GATEWAY_KEY"),
-    gatewayModel: opt("BUTTERBASE_GATEWAY_MODEL"),
+    gatewayModel: opt("BUTTERBASE_GATEWAY_MODEL") ?? "anthropic/claude-sonnet-4.6",
   },
 
   spectrum: {

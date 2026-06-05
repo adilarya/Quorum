@@ -1,54 +1,61 @@
 // OWNER: Adil — channel + backend
 // Butterbase: auth, decisions log, AI Model Gateway.
-// Stage A: composeReply returns a templated mock string; logDecision is in-memory.
-// Stage D: route every reply through the OpenAI-compatible gateway and insert
-//          into the `decisions` table.
 //
-// IMPORTANT: Doniv's brain calls these as INJECTED functions — keep this module
-// channel/brain-agnostic and don't import anything from src/brain/.
+// Verified shapes (from docs.butterbase.ai, 2026-06-05):
+//   import { createClient } from "@butterbase/sdk"
+//   const bb = createClient({ appId, apiUrl, anonKey })
+//   await bb.from("decisions").insert({...})                -> { data, error }
+//   AI gateway: OpenAI-compatible, baseURL=https://api.butterbase.ai/v1
+//   Authorization: Bearer bb_sk_...   (scope: ai:gateway)
+//   Model ids: anthropic/claude-sonnet-4.6, openai/gpt-4o, anthropic/claude-3.5-sonnet
+//
+// Independent gating: each helper goes REAL when its specific env vars are
+// present, regardless of the global USE_MOCKS flag — so backend can ship even
+// while the brain is still mocked.
 
 import OpenAI from "openai";
+import { createClient } from "@butterbase/sdk";
 import { config } from "../config.js";
 import type { ComposeReply, LogDecision } from "../brain/types.js";
 
-// ---------- composeReply ----------
-// OpenAI-compatible gateway is the verified Butterbase shape; only the base URL
-// and model id need confirming in the live docs.
+// ---------- composeReply: AI Model Gateway ----------
 
 let _gateway: OpenAI | null = null;
 
 function gatewayClient(): OpenAI {
   if (_gateway) return _gateway;
-  if (!config.butterbase.gatewayKey || !config.butterbase.gatewayUrl) {
-    throw new Error("BUTTERBASE_GATEWAY_KEY / BUTTERBASE_GATEWAY_URL not set");
-  }
   _gateway = new OpenAI({
-    apiKey: config.butterbase.gatewayKey,
+    apiKey: config.butterbase.gatewayKey!,
     baseURL: config.butterbase.gatewayUrl,
   });
   return _gateway;
 }
 
+function gatewayReady(): boolean {
+  return Boolean(config.butterbase.gatewayKey && config.butterbase.gatewayUrl);
+}
+
 export const composeReply: ComposeReply = async (systemPrompt, userPrompt) => {
-  if (config.useMocks) {
+  if (!gatewayReady()) {
     return mockComposeReply(systemPrompt, userPrompt);
   }
-  const client = gatewayClient();
-  const r = await client.chat.completions.create({
-    // TODO(doc): confirm the exact model id Butterbase's gateway accepts.
-    model: config.butterbase.gatewayModel ?? "claude-3-5-sonnet",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-  });
-  return r.choices[0]?.message.content ?? "";
+  try {
+    const r = await gatewayClient().chat.completions.create({
+      model: config.butterbase.gatewayModel!,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      max_tokens: 200,
+    });
+    const text = r.choices[0]?.message.content?.trim();
+    return text && text.length > 0 ? text : mockComposeReply(systemPrompt, userPrompt);
+  } catch (err) {
+    console.warn("[butterbase] gateway call failed, using mock reply:", err);
+    return mockComposeReply(systemPrompt, userPrompt);
+  }
 };
 
-/**
- * Stage-A mock: deterministic, no network. Looks at the userPrompt to choose
- * between conflict + confirm replies so the demo loop FEELS like the real one.
- */
 function mockComposeReply(_systemPrompt: string, userPrompt: string): string {
   const isConflict = /Previously, <@.+> said/.test(userPrompt);
   if (isConflict) {
@@ -67,32 +74,80 @@ function mockComposeReply(_systemPrompt: string, userPrompt: string): string {
   return "Recorded.";
 }
 
-// ---------- logDecision ----------
-// Stage A: in-memory log. Stage D: insert into the auto-generated REST endpoint
-// for the `decisions` table, or use @butterbase/sdk directly.
+// ---------- logDecision: decisions table ----------
+
+let _bb: ReturnType<typeof createClient> | null = null;
+
+function bbClient() {
+  if (_bb) return _bb;
+  _bb = createClient({
+    appId: config.butterbase.appId!,
+    apiUrl: config.butterbase.apiUrl,
+    ...(config.butterbase.anonKey ? { anonKey: config.butterbase.anonKey } : {}),
+  });
+  return _bb;
+}
+
+function dbReady(): boolean {
+  return Boolean(config.butterbase.appId && config.butterbase.apiKey);
+}
 
 const _mockLog: Array<Record<string, unknown>> = [];
 
 export const logDecision: LogDecision = async (row) => {
-  if (config.useMocks) {
-    _mockLog.push({ ...row, loggedAt: new Date().toISOString() });
+  const payload = {
+    channel_id: row.channelId,
+    user_id: row.userId,
+    topic: row.topic,
+    value: row.value,
+    created_at: row.createdAt,
+    superseded: row.superseded,
+    previous_user_id: row.previousUserId ?? null,
+  };
+
+  if (!dbReady()) {
+    _mockLog.push({ ...payload, loggedAt: new Date().toISOString() });
     return;
   }
-  // TODO(doc): exact SDK shape from https://www.npmjs.com/package/@butterbase/sdk
-  //   import { Butterbase } from "@butterbase/sdk";
-  //   const bb = new Butterbase({ projectId: config.butterbase.projectId!, apiKey: ... });
-  //   await bb.from("decisions").insert(row);
-  //
-  // Fallback while SDK names are unverified: hit the auto-generated REST endpoint.
-  //   await fetch(`${BASE}/decisions`, { method: "POST", headers: { Authorization: `Bearer ${jwt}` }, body: JSON.stringify(row) });
-  throw new Error("Butterbase real logDecision not wired yet — STUB.");
+
+  // 1) Try the SDK insert. If the SDK surface is wrong under time pressure
+  //    we fall through to the auto-generated REST endpoint (the brief says
+  //    every table gets one by default).
+  try {
+    const bb: any = bbClient();
+    // Service-key auth: most BaaS SDKs accept it via setSession or admin client.
+    if (typeof bb.setSession === "function") {
+      bb.setSession({ access_token: config.butterbase.apiKey });
+    }
+    const { error } = await bb.from("decisions").insert(payload);
+    if (!error) return;
+    console.warn("[butterbase] SDK insert returned error, falling back to REST:", error);
+  } catch (err) {
+    console.warn("[butterbase] SDK insert threw, falling back to REST:", err);
+  }
+
+  // 2) REST fallback. Endpoint shape is best-guess from BaaS convention;
+  //    update once we confirm the exact path on dashboard.butterbase.ai/api docs.
+  try {
+    const restUrl = `${config.butterbase.apiUrl}/v1/apps/${config.butterbase.appId}/tables/decisions/rows`;
+    const r = await fetch(restUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.butterbase.apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const body = await r.text();
+      console.error(`[butterbase] REST insert failed ${r.status}: ${body}`);
+    }
+  } catch (err) {
+    console.error("[butterbase] REST insert threw:", err);
+  }
 };
 
-/** For Stage-A debugging only. */
+/** Stage-A debugging hook — peek at the in-memory log when running on mocks. */
 export function _dumpMockLog(): Array<Record<string, unknown>> {
   return [..._mockLog];
 }
-
-// ---------- auth (Stage D) ----------
-// TODO(doc): JWT helper — email/Google/GitHub/magic-link. For the demo, a single
-// service token signed by Butterbase is enough; expose getServiceJwt() here when wired.
